@@ -82,6 +82,8 @@ details summary{cursor:pointer;font-weight:600}
     <h3>会話の記録 <button id="btnCopy" style="float:right;padding:4px 10px;font-size:12.5px">日誌用にコピー</button></h3>
     <div class="log" id="log"><p class="note" style="background:transparent">まだ会話していません。</p></div>
   </div>
+  <div class="box" id="permBox" hidden style="border-color:var(--accent)"></div>
+  <div class="box" id="toolLog" hidden><h3>ミナが使った道具</h3></div>
 
   <div class="box" id="settings" hidden>
     <h3>設定</h3>
@@ -91,10 +93,12 @@ details summary{cursor:pointer;font-weight:600}
     <input type="text" id="wake" autocomplete="off">
     <label>キャラクター</label>
     <div class="row" id="species"></div>
-    <details style="margin-top:12px"><summary>Snavi の文脈を渡す（任意・GitHub）</summary>
-      <p class="note">読み取り専用の細粒度トークンを入れると、会話の最初に「決裁待ちの件数」をミナに渡します。送るのは件数だけで、件名は送りません（顧客名を外部に出さないため）。保存先はこのブラウザだけ、送信先は api.github.com だけです。</p>
-      <label>GitHub トークン（空なら渡さない）</label>
+    <details style="margin-top:12px" open><summary>社員モード（ミナが Snavi の GitHub を読み、仕事を作る）</summary>
+      <p class="note">細粒度トークン（second-brain だけ・Contents 読み・Issues 読み書き）を入れると、ミナは会話中に GitHub の資料を読み、判断待ちを数え、Issue を作れます。鍵は<b>このブラウザの中だけ</b>に保存され、ElevenLabs には渡りません。ミナに渡す文章は<b>伏せ字</b>（顧客名・人名・連絡先を ■■）を通します。伏せ字の名簿は second-brain の <code>voice/mask_words.json</code> から読み、読めなければ資料は渡しません。</p>
+      <label>GitHub トークン（空なら社員モードは使えない）</label>
       <input type="password" id="ghToken" autocomplete="off" placeholder="github_pat_...">
+      <label style="display:flex;gap:8px;align-items:center;margin-top:10px"><input type="checkbox" id="allowWrite"> ミナに書き込みを許す（Issue の作成・コメント。1件ごとに画面で「許可」を押す。1日10件まで）</label>
+      <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="rawMode"> 伏せ字なしで渡す（<b>重</b>・顧客名が ElevenLabs と LLM に渡る。かずきの決裁後だけ）</label>
     </details>
     <div class="btns"><button class="primary" id="btnSave">保存</button><button id="btnClose">閉じる</button></div>
     <p class="note" id="savedNote"></p>
@@ -229,9 +233,73 @@ function stopListening(){ wantListen = false; try { rec && rec.stop(); } catch(e
 
 /* ===================== 頭と口: ElevenLabs ===================== */
 function addLog(who, text){ const l = $('log'); if (transcript.length===0) l.innerHTML = ''; const p = document.createElement('p'); p.className = who==='me' ? 'me' : ''; const s = document.createElement('span'); s.textContent = who==='me' ? 'かずき' : 'ミナ'; p.append(s, text); l.append(p); l.scrollTop = l.scrollHeight; transcript.push({who, text, at: new Date()}); }
+/* ===================== 社員モード: ミナの目と手（鍵はブラウザ内・伏せ字・書き込みは画面で許可） ===================== */
+let allowWrite = lsGet('voice.write') === '1', rawMode = lsGet('voice.raw') === '1';
+let maskWords = null; // null = 名簿を読めていない → 資料は渡さない（fail-closed）
+const MASK_PATTERNS = [
+  /(株式会社|有限会社|合同会社|一般社団法人|医療法人|社会福祉法人)\s?[^\s（）\(\)、。・／【】「」]{1,20}/g,
+  /[^\s（）\(\)、。・／【】「」#0-9]{1,20}(株式会社|有限会社|商店|工務店|印刷|精工|鐵工所|鉄工所|学園|こども園|保育園|幼稚園|医院|クリニック|歯科|病院|法律事務所|社労士事務所|税理士事務所|Cafe|CAFE|STUDIO|Studio|RESORT|Resort)/g,
+  /[一-龠々ァ-ヶー]{2,8}(さん|様|氏|社長|先生)(?![ーァ-ヶ])/g,
+  /\+?(?=(?:[\- ]*\d){10})\d[\d\- ]{8,}\d/g,
+  /[\w.+-]+@[\w-]+\.[\w.]+/g,
+  /(https?:\/\/)?[\w-]+(\.[\w-]+)*\.(com|jp|net|org|io|info|biz|shop|site|me)(\/[\w\/.\-?=&%#]*)?/g,
+];
+const TOOL_MAX = 6000, WRITE_MAX_PER_DAY = 10;
+const ghHeaders = () => ({Authorization:'Bearer ' + ghToken, Accept:'application/vnd.github+json'});
+async function gh(path, init){ const r = await fetch('https://api.github.com' + path, Object.assign({headers: ghHeaders()}, init||{})); if (!r.ok){ let m = ''; try { m = (await r.json()).message || ''; } catch(e){} throw new Error('GitHub ' + r.status + ' ' + m); } return r.json(); }
+const encPath = p => p.split('/').map(encodeURIComponent).join('/');
+function b64utf8(b){ const bin = atob(b.replace(/\n/g,'')); const bytes = new Uint8Array(bin.length); for (let i=0;i<bin.length;i++) bytes[i] = bin.charCodeAt(i); return new TextDecoder('utf-8').decode(bytes); }
+async function readRepoFile(path){ const j = await gh(`/repos/${REPO}/contents/${encPath(path)}`); if (j.encoding !== 'base64') throw new Error('読めない形式'); return b64utf8(j.content); }
+async function loadMaskWords(){ try { const j = JSON.parse(await readRepoFile('01_プロジェクト/AI社員オフィス/voice/mask_words.json')); maskWords = Array.isArray(j.words) ? j.words.filter(w => typeof w === 'string' && w.length >= 2) : null; } catch(e){ maskWords = null; } return !!maskWords; }
+function maskText(text){
+  if (rawMode) return String(text||'');
+  if (!maskWords) throw new Error('伏せ字の名簿を読めていないため、資料の中身は渡せません（トークンと voice/mask_words.json を確認）');
+  let t = String(text||''); for (const w of maskWords.slice().sort((a,b) => b.length-a.length)){ t = t.split(w).join('■■'); }
+  for (const re of MASK_PATTERNS){ t = t.replace(re, m => (/さん|様|氏|社長|先生/.test(m) && !/会社|商店|法人/.test(m)) ? '■■' + m.match(/(さん|様|氏|社長|先生)$/)[0] : '■■'); }
+  return t.replace(/(■■)+/g,'■■');
+}
+const clip = (s, n) => s.length > n ? s.slice(0, n) + `\n…（${s.length - n}文字省略）` : s;
+function writesToday(){ const k = 'voice.writes.' + new Date().toISOString().slice(0,10); return parseInt(lsGet(k)||'0',10) || 0; }
+function bumpWrites(){ const k = 'voice.writes.' + new Date().toISOString().slice(0,10); lsSet(k, String(writesToday()+1)); }
+// 人間の関所: 画面のカードで「許可」を押さないと書き込まない（声だけでは通さない。60秒で自動却下）
+function askPermission(title, detail){
+  return new Promise(resolve => {
+    const box = $('permBox'); box.hidden = false; box.innerHTML = '';
+    const h = document.createElement('b'); h.textContent = 'ミナが書き込もうとしています: ' + title; const pre = document.createElement('pre'); pre.textContent = detail; pre.style.whiteSpace = 'pre-wrap';
+    const ok = document.createElement('button'); ok.className = 'primary'; ok.textContent = '許可する'; const ng = document.createElement('button'); ng.className = 'danger'; ng.textContent = '却下';
+    const row = document.createElement('div'); row.className = 'btns'; row.append(ok, ng); box.append(h, pre, row); box.scrollIntoView({behavior:'smooth', block:'center'});
+    const done = v => { clearTimeout(tm); box.hidden = true; box.innerHTML = ''; resolve(v); };
+    const tm = setTimeout(() => done(false), 60000); ok.addEventListener('click', () => done(true)); ng.addEventListener('click', () => done(false));
+  });
+}
+function toolLog(name, args, result){ const l = $('toolLog'); l.hidden = false; const p = document.createElement('p'); p.className = 'note'; p.textContent = `🔧 ${name}(${JSON.stringify(args||{}).slice(0,120)}) → ${String(result).slice(0,100)}`; l.append(p); l.scrollTop = l.scrollHeight; }
+function wrapTool(name, fn){ return async (args) => { try { const r = await fn(args||{}); toolLog(name, args, r); return typeof r === 'string' ? r : JSON.stringify(r); } catch(e){ const m = 'できませんでした: ' + (e.message||e); toolLog(name, args, m); return m; } }; }
+const TOOLS = {
+  read_file: wrapTool('read_file', async ({path}) => { if (!ghToken) throw new Error('GitHub の鍵がありません'); if (!path) throw new Error('path が要ります'); const t = await readRepoFile(String(path).replace(/^\/+/,'')); return clip(maskText(t), TOOL_MAX); }),
+  search: wrapTool('search', async ({query}) => { if (!ghToken) throw new Error('GitHub の鍵がありません'); const q = encodeURIComponent(`${query} repo:${REPO}`);
+    const [code, iss] = await Promise.all([ gh(`/search/code?q=${q}&per_page=8`).catch(() => ({items:[]})), gh(`/search/issues?q=${q}&per_page=8`).catch(() => ({items:[]})) ]);
+    const a = (code.items||[]).map(x => '・ファイル: ' + x.path); const b = (iss.items||[]).map(x => `・#${x.number} ${maskText(x.title)}（${x.state}${x.pull_request ? '・PR' : ''}）`);
+    return (a.length || b.length) ? [...a, ...b].join('\n') : '見つかりませんでした'; }),
+  list_pending: wrapTool('list_pending', async () => { if (!ghToken) throw new Error('GitHub の鍵がありません'); const rows = await gh(`/repos/${REPO}/issues?state=open&labels=waiting:approval&per_page=50`);
+    if (!rows.length) return 'かずきの判断待ちは 0 件です'; return `判断待ち ${rows.length} 件:\n` + rows.map(x => `・#${x.number} ${maskText(x.title)}（${x.pull_request ? 'PR' : 'Issue'}・${Math.round((Date.now()-new Date(x.updated_at))/36e5)}時間前に更新）`).join('\n'); }),
+  read_issue: wrapTool('read_issue', async ({number}) => { if (!ghToken) throw new Error('GitHub の鍵がありません'); const n = parseInt(number,10); if (!n) throw new Error('番号が要ります');
+    const [i, cs] = await Promise.all([ gh(`/repos/${REPO}/issues/${n}`), gh(`/repos/${REPO}/issues/${n}/comments?per_page=100`) ]);
+    const last = cs.slice(-3).map(c => `--- コメント（${c.user.login}・${c.created_at.slice(0,10)}）\n${c.body||''}`).join('\n');
+    return clip(maskText(`#${n} ${i.title}（${i.state}・ラベル: ${(i.labels||[]).map(l => l.name).join(', ')}）\n${i.body||''}\n${last}`), TOOL_MAX); }),
+  create_task: wrapTool('create_task', async ({title, body, weight}) => { if (!ghToken) throw new Error('GitHub の鍵がありません'); if (!allowWrite) throw new Error('書き込みは許可されていません（設定で「ミナに書き込みを許す」をオン）'); if (writesToday() >= WRITE_MAX_PER_DAY) throw new Error('今日の書き込み上限（10件）に達しました');
+    const w = ['light','medium','heavy'].includes(weight) ? weight : 'light'; const ttl = String(title||'').slice(0,120); const bd = '（ミナが会話から起票）\n\n' + String(body||'');
+    if (!(await askPermission('Issue を作る', `件名: ${ttl}\n重さ: ${w}\n\n${bd}`))) return 'かずきが却下しました';
+    const j = await gh(`/repos/${REPO}/issues`, {method:'POST', body: JSON.stringify({title: ttl, body: bd, labels: ['staff:mina','status:inbox','weight:' + w]})}); bumpWrites(); return `作りました: #${j.number} ${j.html_url}`; }),
+  add_note: wrapTool('add_note', async ({number, text}) => { if (!ghToken) throw new Error('GitHub の鍵がありません'); if (!allowWrite) throw new Error('書き込みは許可されていません'); if (writesToday() >= WRITE_MAX_PER_DAY) throw new Error('今日の書き込み上限（10件）に達しました'); const n = parseInt(number,10); if (!n) throw new Error('番号が要ります');
+    const bd = '（ミナが会話から記録）\n\n' + String(text||''); if (!(await askPermission(`#${n} にコメントする`, bd))) return 'かずきが却下しました';
+    const j = await gh(`/repos/${REPO}/issues/${n}/comments`, {method:'POST', body: JSON.stringify({body: bd})}); bumpWrites(); return `書きました: ${j.html_url}`; }),
+};
 async function githubContext(){
   if (!ghToken) return {};
-  try { const r = await fetch(`https://api.github.com/repos/${REPO}/issues?state=open&labels=waiting:approval&per_page=50`, {headers:{Authorization:'Bearer ' + ghToken, Accept:'application/vnd.github+json'}}); if (!r.ok) throw new Error(r.status); const rows = await r.json(); const prs = rows.filter(x => x.pull_request).length; return {pending_count: rows.length, pending_prs: prs}; } catch(e){ return {}; }
+  const out = {}; try { const rows = await gh(`/repos/${REPO}/issues?state=open&labels=waiting:approval&per_page=50`); out.pending_count = rows.length; out.pending_prs = rows.filter(x => x.pull_request).length; } catch(e){}
+  const ok = await loadMaskWords(); out.employee_mode = ok ? (allowWrite ? '読める・書ける（書き込みは画面で許可）' : '読めるだけ') : '鍵はあるが伏せ字の名簿を読めないため資料は渡せない';
+  if (ok || rawMode){ try { const a = await readRepoFile('00_システム/00_UserProfile/00_マスター(Master_Context).md'); const b = await readRepoFile('00_システム/00_UserProfile/02_最新コンテキスト(Active_Context).md'); out.company_context = clip(maskText(a), 1500) + '\n\n' + clip(maskText(b), 1800); } catch(e){ out.company_context = '（読めませんでした: ' + (e.message||e) + '）'; } }
+  return out;
 }
 async function startCall(how){
   if (state==='call' || state==='connecting') return;
@@ -240,9 +308,10 @@ async function startCall(how){
   setState('connecting', 'ミナを呼んでいます…', how==='wake' ? '呼びかけを聞き取りました' : '');
   let mod; try { mod = await import(SDK_URL); } catch(e){ setState('error', '音声AIの部品を読み込めませんでした。', 'インターネットにつながっているか確認してください（' + (e.message||e) + '）'); resumeListen(); return; }
   const ctx = await githubContext(); const now = new Date();
-  const dyn = Object.assign({ owner:'かずき', today: now.toLocaleDateString('ja-JP',{month:'long',day:'numeric',weekday:'short'}), hour: now.getHours(), pending_count: '不明', pending_prs: '不明' }, ctx);
+  const dyn = Object.assign({ owner:'かずき', today: now.toLocaleDateString('ja-JP',{month:'long',day:'numeric',weekday:'short'}), hour: now.getHours(), pending_count: '不明', pending_prs: '不明', employee_mode: ghToken ? '不明' : '鍵がないので資料は読めない', company_context: '（未取得）' }, ctx);
   try {
-    conv = await mod.Conversation.startSession({ agentId, connectionType:'websocket', dynamicVariables: dyn,
+    conv = await mod.Conversation.startSession({ agentId, connectionType:'websocket', dynamicVariables: dyn, clientTools: TOOLS,
+      onUnhandledClientToolCall: tc => { toolLog(tc && tc.tool_name, tc && tc.parameters, 'この道具はページにありません'); },
       onConnect: () => { setState('call', 'ミナと話しています。', '話し終えたら「終わる」。10分で自動で切れます。'); callTimer = setTimeout(() => endCall('時間'), 10*60*1000); },
       onDisconnect: d => { conv = null; clearTimeout(callTimer); const why = d && d.reason === 'error' ? ' (' + (d.message||'エラー') + ')' : ''; setState('off', '会話を終えました' + why, ''); resumeListen(); },
       onError: (m) => { addLog('mina', '（エラー: ' + m + '）'); },
@@ -255,11 +324,11 @@ function endCall(why){ clearTimeout(callTimer); if (conv){ const c = conv; conv 
 function resumeListen(){ if (wantListen){ setTimeout(() => { if (!conv){ try { rec && rec.start(); } catch(e){} setState('listen', '聞いています。「ヘイ、ミナ」と呼んでください。', ''); } }, 800); } }
 
 /* ===================== 設定画面 ===================== */
-function openSettings(){ $('agentId').value = agentId; $('wake').value = wakeWords.join(', '); $('ghToken').value = ghToken; renderSpecies(); $('settings').hidden = false; $('settings').scrollIntoView({behavior:'smooth'}); }
+function openSettings(){ $('agentId').value = agentId; $('wake').value = wakeWords.join(', '); $('ghToken').value = ghToken; $('allowWrite').checked = allowWrite; $('rawMode').checked = rawMode; renderSpecies(); $('settings').hidden = false; $('settings').scrollIntoView({behavior:'smooth'}); }
 function renderSpecies(){ const r = $('species'); r.innerHTML = ''; Object.entries(SPECIES).forEach(([k,v]) => { const b = document.createElement('button'); b.type='button'; b.textContent = v.name; if (k===species) b.className = 'primary'; b.addEventListener('click', () => { species = k; lsSet('voice.species', k); renderSpecies(); }); r.append(b); }); }
 $('btnSettings').addEventListener('click', openSettings);
 $('btnClose').addEventListener('click', () => { $('settings').hidden = true; });
-$('btnSave').addEventListener('click', () => { const m = ($('agentId').value||'').match(/agent_[A-Za-z0-9]+/); agentId = m ? m[0] : $('agentId').value.trim(); $('agentId').value = agentId; wakeWords = $('wake').value.split(/[,、]/).map(s => s.trim()).filter(Boolean); if (!wakeWords.length) wakeWords = DEFAULT_WAKE.slice(); ghToken = $('ghToken').value.trim(); lsSet('voice.agentId', agentId || null); lsSet('voice.wake', JSON.stringify(wakeWords)); lsSet('voice.ghToken', ghToken || null); $('savedNote').textContent = '保存しました（このブラウザだけに保存）'; toast('保存しました'); });
+$('btnSave').addEventListener('click', () => { const m = ($('agentId').value||'').match(/agent_[A-Za-z0-9]+/); agentId = m ? m[0] : $('agentId').value.trim(); $('agentId').value = agentId; wakeWords = $('wake').value.split(/[,、]/).map(s => s.trim()).filter(Boolean); if (!wakeWords.length) wakeWords = DEFAULT_WAKE.slice(); ghToken = $('ghToken').value.trim(); allowWrite = $('allowWrite').checked; rawMode = $('rawMode').checked; lsSet('voice.write', allowWrite ? '1' : '0'); lsSet('voice.raw', rawMode ? '1' : '0'); lsSet('voice.agentId', agentId || null); lsSet('voice.wake', JSON.stringify(wakeWords)); lsSet('voice.ghToken', ghToken || null); $('savedNote').textContent = '保存しました（このブラウザだけに保存）'; toast('保存しました'); });
 $('btnAddWake').addEventListener('click', () => { const w = $('btnAddWake').dataset.word; if (!w) return; if (!wakeWords.includes(w)) wakeWords.push(w); lsSet('voice.wake', JSON.stringify(wakeWords)); toast('「' + w + '」を呼びかけの言葉に足しました'); });
 $('btnListen').addEventListener('click', () => { if (wantListen) stopListening(); else startListening(); });
 $('btnTalk').addEventListener('click', () => startCall('button'));
