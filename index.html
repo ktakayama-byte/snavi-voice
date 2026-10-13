@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' blob: data: https://cdn.jsdelivr.net https://unpkg.com; connect-src blob: data: https://api.elevenlabs.io wss://api.elevenlabs.io https://*.elevenlabs.io wss://*.elevenlabs.io https://*.livekit.cloud wss://*.livekit.cloud https://cdn.jsdelivr.net https://unpkg.com https://api.github.com; style-src 'unsafe-inline'; img-src data: blob:; media-src blob: data: mediastream:; worker-src blob: data:; child-src blob: data:; font-src 'none'; base-uri 'none'; form-action 'none'">
+<title>ヘイ、ミナ — Snavi Studio 声で相談</title>
+<style>
+:root{--bg:#f4efe6;--surface:#fffdf8;--ink:#2b2622;--sub:#6e655c;--line:#e2d9cb;--accent:#e8792b;--ok:#3a9d5d;--warn:#d9534f;--pill:#efe6d6}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#17171c;--surface:#22222a;--ink:#f1ebe0;--sub:#a9a196;--line:#34343f;--pill:#2d2d38}}
+:root[data-theme="dark"]{--bg:#17171c;--surface:#22222a;--ink:#f1ebe0;--sub:#a9a196;--line:#34343f;--pill:#2d2d38}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif;font-size:15px;line-height:1.6}
+.wrap{max-width:760px;margin:0 auto;padding:20px 16px 60px}
+header{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+h1{font-size:18px;margin:0}
+.pill{display:inline-flex;align-items:center;gap:6px;background:var(--pill);border-radius:999px;padding:4px 12px;font-size:13px}
+.pill i{width:8px;height:8px;border-radius:50%;background:#999;display:inline-block}
+.pill.on i{background:var(--ok);box-shadow:0 0 0 4px rgba(58,157,93,.2)}
+.pill.call i{background:var(--accent);animation:blink 1s infinite}
+.pill.err i{background:var(--warn)}
+@keyframes blink{50%{opacity:.3}}
+.stage{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:18px;margin-top:16px;display:grid;grid-template-columns:200px 1fr;gap:18px;align-items:center}
+@media (max-width:560px){.stage{grid-template-columns:1fr;justify-items:center}}
+canvas#cv{image-rendering:pixelated;width:192px;height:208px;display:block;position:relative;z-index:1}
+.avatar{position:relative;width:240px;height:240px;display:grid;place-items:center}
+canvas#orb{position:absolute;inset:0;width:240px;height:240px;z-index:0}
+.btns button.big{font-size:17px;padding:12px 18px}
+.say{font-size:17px;min-height:3em}
+.say small{display:block;color:var(--sub);font-size:12.5px;margin-top:4px}
+.btns{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+button{font:inherit;border:1px solid var(--line);background:var(--surface);color:var(--ink);border-radius:10px;padding:9px 14px;cursor:pointer}
+button.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+button.danger{color:var(--warn)}
+button:disabled{opacity:.45;cursor:default}
+.box{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:14px 16px;margin-top:14px}
+.box h3{margin:0 0 6px;font-size:14px}
+.heard{font-family:ui-monospace,Menlo,monospace;font-size:13.5px;color:var(--sub);min-height:1.6em;overflow-wrap:anywhere}
+.heard b{color:var(--ink)}
+.log{max-height:260px;overflow:auto;font-size:14px}
+.log p{margin:4px 0;padding:6px 10px;border-radius:10px;background:var(--pill);overflow-wrap:anywhere}
+.log p.me{background:transparent;border:1px solid var(--line)}
+.log p span{color:var(--sub);font-size:12px;margin-right:6px}
+label{display:block;font-size:13px;color:var(--sub);margin-top:10px}
+input[type=text],input[type=password],textarea{width:100%;font:inherit;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink)}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.chip{display:inline-block;background:var(--pill);border-radius:999px;padding:2px 10px;font-size:12.5px;margin:2px 4px 2px 0}
+.note{color:var(--sub);font-size:13px}
+.ok{color:var(--ok)} .ng{color:var(--warn)}
+details summary{cursor:pointer;font-weight:600}
+[hidden]{display:none !important}
+#toast{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:12px;font-size:14px;max-width:90vw}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>ヘイ、ミナ <span class="note">Snavi Studio 声で相談</span></h1>
+    <span class="pill" id="pill"><i></i><span id="pillT">オフ</span></span>
+  </header>
+
+  <div class="stage">
+    <div class="avatar"><canvas id="orb" width="240" height="240"></canvas><canvas id="cv" width="192" height="208"></canvas></div>
+    <div>
+      <div class="say" id="say">「待受をオン」にして、<b>ヘイ、ミナ</b> と呼んでください。<small id="sub">マイクの許可を聞かれたら「許可」。呼びかけが聞こえると会話が始まります。</small></div>
+      <div class="btns">
+        <button class="primary" id="btnListen">待受をオン</button>
+        <button id="btnTalk">今すぐ話す</button>
+        <button class="danger" id="btnEnd" disabled>終わる</button>
+        <button id="btnSettings">設定</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="box">
+    <h3>聞こえている言葉</h3>
+    <div class="heard" id="heard">（待受がオフです）</div>
+    <div class="row" style="margin-top:8px"><button id="btnAddWake" hidden>この言葉を呼びかけに足す</button></div>
+  </div>
+
+  <div class="box">
+    <h3>会話の記録 <button id="btnCopy" style="float:right;padding:4px 10px;font-size:12.5px">日誌用にコピー</button></h3>
+    <div class="log" id="log"><p class="note" style="background:transparent">まだ会話していません。</p></div>
+  </div>
+
+  <div class="box" id="settings" hidden>
+    <h3>設定</h3>
+    <label>ElevenLabs のエージェントID（Agents → ミナ → Agent ID。<code>agent_</code> で始まる）</label>
+    <input type="text" id="agentId" placeholder="agent_xxxxxxxxxxxxxxxxxxxx" autocomplete="off">
+    <label>呼びかけの言葉（カンマ区切り。聞こえた言葉がこれを含むと会話が始まります）</label>
+    <input type="text" id="wake" autocomplete="off">
+    <label>キャラクター</label>
+    <div class="row" id="species"></div>
+    <details style="margin-top:12px"><summary>Snavi の文脈を渡す（任意・GitHub）</summary>
+      <p class="note">読み取り専用の細粒度トークンを入れると、会話の最初に「決裁待ちの件数」をミナに渡します。送るのは件数だけで、件名は送りません（顧客名を外部に出さないため）。保存先はこのブラウザだけ、送信先は api.github.com だけです。</p>
+      <label>GitHub トークン（空なら渡さない）</label>
+      <input type="password" id="ghToken" autocomplete="off" placeholder="github_pat_...">
+    </details>
+    <div class="btns"><button class="primary" id="btnSave">保存</button><button id="btnClose">閉じる</button></div>
+    <p class="note" id="savedNote"></p>
+  </div>
+
+  <div class="box">
+    <details><summary>仕組みと注意（はじめに1回読む）</summary>
+      <ul class="note">
+        <li><b>耳</b>: Chrome の音声認識が呼びかけを待ちます。待受中の音声は Google のサーバーで文字にされます。顧客との打ち合わせ中は待受をオフにしてください。</li>
+        <li><b>頭と口</b>: ElevenLabs の会話AI「ミナ」が返事を考えて声にします。役割文は <code>voice/ミナ_役割文.md</code>。会話は ElevenLabs に送られるので、顧客名・個人名は口にしない運用にします。</li>
+        <li><b>マイクの許可は2か所</b>: Chrome の許可と、Mac 本体の「システム設定 → プライバシーとセキュリティ → マイク → Google Chrome」。</li>
+        <li><b>費用</b>: 無料プランは会話15分／月。有料にするかは判定日（開始から14日後）に決めます。無料プランは商用利用不可なので、SNS 用の動画は有料にしてから撮ります。</li>
+        <li><b>外部通信</b>: ElevenLabs、SDK の配信元（jsdelivr）、任意で api.github.com の3つだけ。それ以外へは出ません。</li>
+      </ul>
+    </details>
+  </div>
+</div>
+<div id="toast" hidden></div>
+
+<script>
+/* ===================== 設定 ===================== */
+const SDK_URL = 'https://cdn.jsdelivr.net/npm/@elevenlabs/client@1.27.0/+esm';
+const REPO = 'ktakayama-byte/second-brain';
+const DEFAULT_WAKE = ['ヘイミナ','ヘイ、ミナ','へいみな','ヘイミーナ','ミナ','みな','美奈','ミーナ','みーな','mina','meena'];
+function lsGet(k){ try { return localStorage.getItem(k); } catch(e){ return null; } }
+function lsSet(k,v){ try { if (v===null) localStorage.removeItem(k); else localStorage.setItem(k,v); } catch(e){} }
+let agentId = lsGet('voice.agentId') || '';
+let wakeWords = (() => { try { const v = JSON.parse(lsGet('voice.wake')||'null'); return Array.isArray(v) && v.length ? v : DEFAULT_WAKE.slice(); } catch(e){ return DEFAULT_WAKE.slice(); } })();
+let species = lsGet('voice.species') || 'dog';
+let ghToken = lsGet('voice.ghToken') || '';
+
+/* ===================== キャラクター（Studio と同じドット絵） ===================== */
+const SPECIES = {
+  dog:    {name:'いぬ', top:0, eyes:[[3,3],[8,3]], rows:['............','.BBBBBBBBBB.','.BBBBBBBBBB.','.BBDBBBBDBB.','.BBBBWWBBBB.','.BBBWWDWWBB.','..BBBWWWBB..','...BBBBBB...','..BBAAAABB..','.BBBBBBBBBB.','.BWB....BWB.'], ears:true},
+  cat:    {name:'ねこ', top:0, eyes:[[3,3],[8,3]], rows:['.EE......EE.','.EBB....BBE.','.BBBBBBBBBB.','.BBDBBBBDBB.','WBBBBWWBBBBW','WBBBWWDWWBBW','..BBBWWWBB..','...BBBBBB...','..BBAAAABB..','.BBBBBBBBBBB','.BWB....BWB.']},
+  rabbit: {name:'うさぎ', top:2, eyes:[[3,3],[8,3]], rows:['...EE..EE...','...EE..EE...','...EB..BE...','.BBBBBBBBBB.','.BBBBBBBBBB.','.BBDBBBBDBB.','.BBBBWWBBBB.','.BBBWWDWWBB.','..BBBWWWBB..','...BBBBBB...','..BBAAAABB..','.BBBBBBBBBB.','.BWB....BWB.']},
+  bear:   {name:'くま', top:0, eyes:[[3,3],[8,3]], rows:['.EEE....EEE.','EEBBBBBBBBEE','.BBBBBBBBBB.','.BBDBBBBDBB.','.BBBWWWWBBB.','.BBWWWDWWWB.','..BBWWWWBB..','...BBBBBB...','..BBAAAABB..','.BBBBBBBBBB.','.BWB....BWB.']},
+  penguin:{name:'ペンギン', top:0, eyes:[[4,3],[7,3]], rows:['....BBBB....','..BBBBBBBB..','.BBBBBBBBBB.','.BBWDBBDWBB.','.BBBWAABWBB.','.BBBWWWWBBB.','.BBWWWWWWBB.','BBBWWWWWWBBB','B.BWWWWWWB.B','..BBWWWWBB..','..AA....AA..']},
+  robot:  {name:'ロボット', top:0, eyes:[[3,4],[4,4],[7,4],[8,4]], rows:['.....AA.....','.....DD.....','.DDDDDDDDDD.','.DBBBBBBBBD.','.DBAABBAABD.','.DBBBBBBBBD.','.DBDDDDDDBD.','..DDDDDDDD..','.BBBBAABBBB.','.BBBBBBBBBB.','.DDB....BDD.']},
+};
+const EARS = { point:['.EE......EE.','.EEB....BEE.'], flop:['............','EEB......BEE'], round:['.EEE....EEE.','EEEB....BEEE'] };
+const MINA = {coat:'#e9c9a3', ear:'flop', acc:'#d9534f'};
+function darken(hex, f){ const n = parseInt(hex.slice(1),16); return `rgb(${Math.round(((n>>16)&255)*f)},${Math.round(((n>>8)&255)*f)},${Math.round((n&255)*f)})`; }
+function charRows(){
+  const sp = SPECIES[species] || SPECIES.dog; const rows = sp.rows.slice();
+  if (sp.ears){ const ears = EARS[MINA.ear]; rows[0] = ears[0]; const r1 = rows[1].split(''); for (let i=0;i<12;i++){ if (ears[1][i]==='E') r1[i]='E'; } rows[1] = r1.join(''); }
+  return {rows, top: sp.top, eyes: sp.eyes, robot: species==='robot', penguin: species==='penguin'};
+}
+// mouth: 0〜1。口の行（下から4行目あたり）を開く
+// モワモワ（声に合わせてふくらむ光の玉）。in=自分の声 out=ミナの声
+function drawOrb(frame, out, inp, state){
+  const cv = document.getElementById('orb'), c = cv.getContext('2d'); const W = cv.width, H = cv.height; c.clearRect(0,0,W,H);
+  if (state==='off' || state==='error') { c.globalAlpha = .25; } else c.globalAlpha = 1;
+  const cx = W/2, cy = H/2, base = state==='call' ? 78 : state==='listen' ? 70 : 62;
+  const amp = Math.min(1, out*2.2), mine = Math.min(1, inp*2.2);
+  const hue = state==='call' ? 24 : state==='listen' ? 150 : state==='connecting' ? 45 : 0;
+  for (let layer = 3; layer >= 1; layer--){
+    const r0 = base + layer*10 + amp*26 + mine*10; c.beginPath();
+    for (let a = 0; a <= Math.PI*2 + 0.01; a += Math.PI/48){
+      const w = Math.sin(a*3 + frame/23 + layer) * (6 + amp*14) + Math.sin(a*5 - frame/17) * (4 + amp*8) + Math.sin(a*2 + frame/40) * 5;
+      const r = r0 + w; const x = cx + Math.cos(a)*r, y = cy + Math.sin(a)*r; if (a===0) c.moveTo(x,y); else c.lineTo(x,y);
+    }
+    c.closePath();
+    const g = c.createRadialGradient(cx, cy, 10, cx, cy, r0 + 20);
+    const sat = state==='off' ? 10 : 70;
+    g.addColorStop(0, `hsla(${hue},${sat}%,70%,${0.55 - layer*0.12 + amp*0.2})`); g.addColorStop(1, `hsla(${hue+30},${sat}%,60%,0)`);
+    c.fillStyle = g; c.fill();
+  }
+  c.globalAlpha = 1;
+}
+function draw(frame, mouth, state){
+  const cv = document.getElementById('cv'), c2 = cv.getContext('2d'); c2.clearRect(0,0,cv.width,cv.height);
+  const {rows, top, eyes, robot, penguin} = charRows();
+  const body = penguin ? '#2b2d33' : MINA.coat;
+  const pal = { B: body, E: robot ? MINA.coat : darken(body, 0.72), D: robot ? '#3a3f4a' : '#2a2320', W:'#fff7ee', A: penguin ? '#f2a33a' : MINA.acc };
+  const sc = 12, ox = 2, oy = 2 + (top ? 0 : 2);
+  const last = rows.length - 1; const bob = state==='call' ? (frame%20<10 ? 0 : -1) : 0;
+  const blink = frame % 90 < 4;
+  for (let r=0;r<rows.length;r++){ for (let c=0;c<12;c++){ const ch = rows[r][c]; if (ch==='.') continue; let y = r + bob; if (r===last && state==='call' && mouth>0.5) y = r + (frame%2 ? -1 : 0);
+    c2.fillStyle = pal[ch]; c2.fillRect((ox+c)*sc, (oy+y)*sc, sc, sc); } }
+  if (blink){ eyes.forEach(([x,y]) => { c2.fillStyle = pal.B; c2.fillRect((ox+x)*sc, (oy+y+top+bob)*sc, sc, sc); }); }
+  // 口パク: 目の2行下に黒い口（開き具合で高さが変わる）
+  if (mouth > 0.08){ const my = top + (robot ? 6 : 5) + bob; const h = mouth > 0.5 ? 2 : 1; c2.fillStyle = robot ? '#9fe870' : '#3a2320'; c2.fillRect((ox+5)*sc, (oy+my)*sc, 2*sc, h*sc); if (!robot && mouth > 0.5){ c2.fillStyle = '#e07070'; c2.fillRect((ox+5)*sc, (oy+my+1)*sc, 2*sc, sc*0.6); } }
+  // 待受中: 耳元にマイクの波
+  if (state==='listen'){ c2.fillStyle = '#3a9d5d'; const a = frame % 30; [[14, 4],[15, 3],[15, 5]].forEach(([x,y],i) => { if (a > i*8) c2.fillRect((ox+x)*sc, (oy+y+top)*sc, sc*0.6, sc*0.6); }); }
+  if (state==='connecting'){ c2.fillStyle = '#bbb'; [[13,-1],[14,-2],[15,-3]].forEach(([x,y],i) => { if ((frame>>3)%3===i) c2.fillRect((ox+x)*sc, (oy+y+top+2)*sc, sc*0.7, sc*0.7); }); }
+}
+
+/* ===================== 状態 ===================== */
+let state = 'off'; // off | listen | connecting | call | error
+let restarts = [], gotResult = false;
+let frame = 0, mouthLevel = 0, conv = null, rec = null, wantListen = false, callTimer = 0, transcript = [];
+const $ = id => document.getElementById(id);
+function toast(t){ const e = $('toast'); e.textContent = t; e.hidden = false; clearTimeout(toast.t); toast.t = setTimeout(() => e.hidden = true, 4000); }
+function setState(s, text, sub){
+  state = s; const p = $('pill'); p.className = 'pill ' + (s==='listen' ? 'on' : s==='call' || s==='connecting' ? 'call' : s==='error' ? 'err' : '');
+  $('pillT').textContent = {off:'オフ', listen:'待受中', connecting:'つないでいます', call:'会話中', error:'止まっています'}[s];
+  if (text !== undefined){ $('say').innerHTML = ''; $('say').append(text); if (sub){ const sm = document.createElement('small'); sm.textContent = sub; $('say').append(sm); } }
+  $('btnEnd').disabled = !(s==='call' || s==='connecting'); $('btnListen').textContent = wantListen ? '待受をオフ' : '待受をオン';
+  $('btnTalk').disabled = (s==='call' || s==='connecting');
+}
+let inLevel = 0;
+(function loop(){ frame++; if (conv && state==='call'){ try { mouthLevel = conv.getOutputVolume(); inLevel = conv.getInputVolume(); } catch(e){ mouthLevel = 0; inLevel = 0; } } else { mouthLevel = 0; inLevel = 0; } drawOrb(frame, mouthLevel, inLevel, state); draw(frame, mouthLevel, state); requestAnimationFrame(loop); })();
+
+/* ===================== 耳: 呼びかけの待受 ===================== */
+const norm = s => (s||'').toLowerCase().replace(/[\s、。，．,.!！?？「」『』]/g,'');
+function isWake(text){ const t = norm(text); return wakeWords.some(w => w && t.includes(norm(w))); }
+function makeRec(){
+  const R = window.SpeechRecognition || window.webkitSpeechRecognition; if (!R) return null;
+  const r = new R(); r.lang = 'ja-JP'; r.continuous = true; r.interimResults = true; r.maxAlternatives = 1;
+  r.onresult = ev => {
+    gotResult = true; let last = ''; for (let i = ev.resultIndex; i < ev.results.length; i++){ last = ev.results[i][0].transcript; }
+    $('heard').innerHTML = ''; const b = document.createElement('b'); b.textContent = last; $('heard').append('聞こえた: ', b); $('btnAddWake').hidden = !last; $('btnAddWake').dataset.word = last;
+    if (state==='listen' && isWake(last)){ startCall('wake'); }
+  };
+  r.onerror = ev => { if (ev.error === 'not-allowed' || ev.error === 'service-not-allowed'){ wantListen = false; setState('error', 'マイクが許可されていません。', 'Chrome のアドレス欄左の鍵アイコン → マイクを許可。Mac 本体のシステム設定 → プライバシーとセキュリティ → マイク → Google Chrome もオンにしてください。'); } else if (ev.error !== 'no-speech' && ev.error !== 'aborted'){ $('heard').textContent = '音声認識のエラー: ' + ev.error; } };
+  r.onend = () => {
+    if (!(wantListen && state==='listen')) return;
+    const now = Date.now(); restarts = restarts.filter(t => now - t < 15000); restarts.push(now);
+    if (restarts.length >= 4 && !gotResult){ wantListen = false; setState('error', 'マイクの許可が毎回聞かれています。', 'Chrome の許可ダイアログで「この選択を保存」を「常に許可」（「このサイトを閉じるまで」ではない方）にしてから「許可する」を押してください。または、アドレス欄左のアイコン → サイトの設定 → マイクを「許可」にして再読み込み。'); return; }
+    setTimeout(() => { if (wantListen && state==='listen'){ try { r.start(); } catch(e){} } }, 400);
+  };
+  return r;
+}
+async function startListening(){
+  if (!(window.SpeechRecognition || window.webkitSpeechRecognition)){ setState('error', 'このブラウザは呼びかけの待受ができません。', 'Chrome か Edge で開いてください。「今すぐ話す」なら使えます。'); return; }
+  wantListen = true; restarts = []; gotResult = false; if (!rec) rec = makeRec(); try { rec.start(); } catch(e){}
+  setState('listen', '聞いています。「ヘイ、ミナ」と呼んでください。', '呼びかけの言葉は設定で足せます。別の言葉に聞こえていたら「この言葉を呼びかけに足す」。');
+  $('heard').textContent = '…';
+}
+function stopListening(){ wantListen = false; try { rec && rec.stop(); } catch(e){} if (state==='listen'){ setState('off', '待受はオフです。', '「待受をオン」で再開、「今すぐ話す」で呼びかけなしに会話できます。'); $('heard').textContent = '（待受がオフです）'; } else $('btnListen').textContent = '待受をオン'; }
+
+/* ===================== 頭と口: ElevenLabs ===================== */
+function addLog(who, text){ const l = $('log'); if (transcript.length===0) l.innerHTML = ''; const p = document.createElement('p'); p.className = who==='me' ? 'me' : ''; const s = document.createElement('span'); s.textContent = who==='me' ? 'かずき' : 'ミナ'; p.append(s, text); l.append(p); l.scrollTop = l.scrollHeight; transcript.push({who, text, at: new Date()}); }
+async function githubContext(){
+  if (!ghToken) return {};
+  try { const r = await fetch(`https://api.github.com/repos/${REPO}/issues?state=open&labels=waiting:approval&per_page=50`, {headers:{Authorization:'Bearer ' + ghToken, Accept:'application/vnd.github+json'}}); if (!r.ok) throw new Error(r.status); const rows = await r.json(); const prs = rows.filter(x => x.pull_request).length; return {pending_count: rows.length, pending_prs: prs}; } catch(e){ return {}; }
+}
+async function startCall(how){
+  if (state==='call' || state==='connecting') return;
+  if (!agentId){ openSettings(); toast('ElevenLabs のエージェントIDを入れてください'); return; }
+  try { rec && rec.stop(); } catch(e){}
+  setState('connecting', 'ミナを呼んでいます…', how==='wake' ? '呼びかけを聞き取りました' : '');
+  let mod; try { mod = await import(SDK_URL); } catch(e){ setState('error', '音声AIの部品を読み込めませんでした。', 'インターネットにつながっているか確認してください（' + (e.message||e) + '）'); resumeListen(); return; }
+  const ctx = await githubContext(); const now = new Date();
+  const dyn = Object.assign({ owner:'かずき', today: now.toLocaleDateString('ja-JP',{month:'long',day:'numeric',weekday:'short'}), hour: now.getHours(), pending_count: '不明', pending_prs: '不明' }, ctx);
+  try {
+    conv = await mod.Conversation.startSession({ agentId, connectionType:'websocket', dynamicVariables: dyn,
+      onConnect: () => { setState('call', 'ミナと話しています。', '話し終えたら「終わる」。10分で自動で切れます。'); callTimer = setTimeout(() => endCall('時間'), 10*60*1000); },
+      onDisconnect: d => { conv = null; clearTimeout(callTimer); const why = d && d.reason === 'error' ? ' (' + (d.message||'エラー') + ')' : ''; setState('off', '会話を終えました' + why, ''); resumeListen(); },
+      onError: (m) => { addLog('mina', '（エラー: ' + m + '）'); },
+      onModeChange: ({mode}) => { if (state==='call'){ $('sub').textContent = mode==='speaking' ? 'ミナが話しています' : '聞いています'; } },
+      onMessage: ({source, message}) => { if (message) addLog(source==='user' ? 'me' : 'mina', message); },
+    });
+  } catch(e){ conv = null; setState('error', 'ミナにつながりませんでした。', (e.message||String(e)) + ' — エージェントIDが正しいか、ElevenLabs でエージェントが「公開（認証なし）」になっているか確認してください。'); resumeListen(); }
+}
+function endCall(why){ clearTimeout(callTimer); if (conv){ const c = conv; conv = null; c.endSession().catch(()=>{}); } if (why==='時間') toast('10分たったので会話を終えました'); setState('off', '会話を終えました。', ''); resumeListen(); }
+function resumeListen(){ if (wantListen){ setTimeout(() => { if (!conv){ try { rec && rec.start(); } catch(e){} setState('listen', '聞いています。「ヘイ、ミナ」と呼んでください。', ''); } }, 800); } }
+
+/* ===================== 設定画面 ===================== */
+function openSettings(){ $('agentId').value = agentId; $('wake').value = wakeWords.join(', '); $('ghToken').value = ghToken; renderSpecies(); $('settings').hidden = false; $('settings').scrollIntoView({behavior:'smooth'}); }
+function renderSpecies(){ const r = $('species'); r.innerHTML = ''; Object.entries(SPECIES).forEach(([k,v]) => { const b = document.createElement('button'); b.type='button'; b.textContent = v.name; if (k===species) b.className = 'primary'; b.addEventListener('click', () => { species = k; lsSet('voice.species', k); renderSpecies(); }); r.append(b); }); }
+$('btnSettings').addEventListener('click', openSettings);
+$('btnClose').addEventListener('click', () => { $('settings').hidden = true; });
+$('btnSave').addEventListener('click', () => { const m = ($('agentId').value||'').match(/agent_[A-Za-z0-9]+/); agentId = m ? m[0] : $('agentId').value.trim(); $('agentId').value = agentId; wakeWords = $('wake').value.split(/[,、]/).map(s => s.trim()).filter(Boolean); if (!wakeWords.length) wakeWords = DEFAULT_WAKE.slice(); ghToken = $('ghToken').value.trim(); lsSet('voice.agentId', agentId || null); lsSet('voice.wake', JSON.stringify(wakeWords)); lsSet('voice.ghToken', ghToken || null); $('savedNote').textContent = '保存しました（このブラウザだけに保存）'; toast('保存しました'); });
+$('btnAddWake').addEventListener('click', () => { const w = $('btnAddWake').dataset.word; if (!w) return; if (!wakeWords.includes(w)) wakeWords.push(w); lsSet('voice.wake', JSON.stringify(wakeWords)); toast('「' + w + '」を呼びかけの言葉に足しました'); });
+$('btnListen').addEventListener('click', () => { if (wantListen) stopListening(); else startListening(); });
+$('btnTalk').addEventListener('click', () => startCall('button'));
+$('btnEnd').addEventListener('click', () => endCall('button'));
+$('btnCopy').addEventListener('click', async () => { if (!transcript.length){ toast('まだ会話がありません'); return; } const d = new Date(); const head = `- ${d.getHours()}:${String(d.getMinutes()).padStart(2,'0')} JST｜ミナと声で相談（voice.html）`; const body = transcript.map(t => `  - ${t.who==='me' ? 'かずき' : 'ミナ'}: ${t.text}`).join('\n'); try { await navigator.clipboard.writeText(head + '\n' + body); toast('日誌の Inbox に貼れる形でコピーしました'); } catch(e){ toast('コピーできませんでした'); } });
+window.addEventListener('keydown', e => { if (e.key === 'Escape' && (state==='call' || state==='connecting')) endCall('button'); });
+const isBrave = !!(navigator.brave && navigator.brave.isBrave); const hasSR = !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+const noWake = isBrave || !hasSR;
+if (noWake){ const bl = $('btnListen'), bt = $('btnTalk'); bl.className = ''; bt.className = 'primary big'; bl.parentNode.insertBefore(bt, bl); bl.textContent = '待受（このブラウザでは不可）'; bl.disabled = true; }
+if (!agentId){ setState('off', '最初に「設定」で ElevenLabs のエージェントIDを入れてください。', '作り方は voice/README.md（かずき10分）。'); }
+else if (noWake) setState('off', '「今すぐ話す」を押すと、ミナが出ます。', isBrave ? 'Brave は呼びかけの待受（音声認識）を止めているため、ボタンで呼びます。待受を使うなら Chrome か Safari で開いてください。' : 'このブラウザには音声認識がないため、ボタンで呼びます。');
+else setState('off', '「待受をオン」にして、ヘイ、ミナ と呼んでください。', 'マイクの許可を聞かれたら「許可」。');
+// テスト用（ヘッドレスで呼びかけを模擬する）
+window.__hear = t => { if (state==='listen' && isWake(t)) startCall('wake'); return isWake(t); };
+</script>
+</body>
+</html>
