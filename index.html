@@ -249,7 +249,18 @@ const ghHeaders = () => ({Authorization:'Bearer ' + ghToken, Accept:'application
 async function gh(path, init){ const r = await fetch('https://api.github.com' + path, Object.assign({headers: ghHeaders()}, init||{})); if (!r.ok){ let m = ''; try { m = (await r.json()).message || ''; } catch(e){} throw new Error('GitHub ' + r.status + ' ' + m); } return r.json(); }
 const encPath = p => p.split('/').map(encodeURIComponent).join('/');
 function b64utf8(b){ const bin = atob(b.replace(/\n/g,'')); const bytes = new Uint8Array(bin.length); for (let i=0;i<bin.length;i++) bytes[i] = bin.charCodeAt(i); return new TextDecoder('utf-8').decode(bytes); }
-async function readRepoFile(path){ const j = await gh(`/repos/${REPO}/contents/${encPath(path)}`); if (j.encoding !== 'base64') throw new Error('読めない形式'); return b64utf8(j.content); }
+async function readRepoFile(path){ const j = await gh(`/repos/${REPO}/contents/${encPath(path)}`); if (Array.isArray(j)) return 'これはフォルダです。中身:\n' + j.map(x => (x.type === 'dir' ? '📁 ' : '・') + x.path).join('\n'); if (j.encoding !== 'base64') throw new Error('読めない形式'); return b64utf8(j.content); }
+// リポジトリの全ファイル一覧（1会話に1回だけ取り、ファイル名で探す。GitHub のコード検索は日本語に弱いため）
+let treeCache = null;
+async function getTree(){ if (treeCache) return treeCache; const j = await gh(`/repos/${REPO}/git/trees/main?recursive=1`); treeCache = (j.tree||[]).filter(x => x.type === 'blob').map(x => x.path); if (j.truncated) toolLog('tree', {}, '一覧が長すぎて一部省略'); return treeCache; }
+const normQ = s => String(s||'').toLowerCase().replace(/[\s　]+/g,' ').trim();
+function searchPaths(paths, query){
+  const toks = normQ(query).split(' ').filter(Boolean); if (!toks.length) return [];
+  const hit = paths.filter(p => { const l = p.toLowerCase(); return toks.every(t => l.includes(t)); });
+  const score = p => (/(README|引き継ぎ|設計|全体|00_|01_)/.test(p.split('/').pop()) ? 0 : 1) * 10 + p.split('/').length;
+  return hit.sort((a,b) => score(a)-score(b)).slice(0, 20);
+}
+function projectList(paths){ const s = new Set(); for (const p of paths){ const m = p.match(/^01_プロジェクト\/([^\/]+)\//); if (m) s.add(m[1]); } return [...s].sort(); }
 async function loadMaskWords(){ try { const j = JSON.parse(await readRepoFile('01_プロジェクト/AI社員オフィス/voice/mask_words.json')); maskWords = Array.isArray(j.words) ? j.words.filter(w => typeof w === 'string' && w.length >= 2) : null; } catch(e){ maskWords = null; } return !!maskWords; }
 function maskText(text){
   if (rawMode) return String(text||'');
@@ -277,9 +288,12 @@ function wrapTool(name, fn){ return async (args) => { try { const r = await fn(a
 const TOOLS = {
   read_file: wrapTool('read_file', async ({path}) => { if (!ghToken) throw new Error('GitHub の鍵がありません'); if (!path) throw new Error('path が要ります'); const t = await readRepoFile(String(path).replace(/^\/+/,'')); return clip(maskText(t), TOOL_MAX); }),
   search: wrapTool('search', async ({query}) => { if (!ghToken) throw new Error('GitHub の鍵がありません'); const q = encodeURIComponent(`${query} repo:${REPO}`);
-    const [code, iss] = await Promise.all([ gh(`/search/code?q=${q}&per_page=8`).catch(() => ({items:[]})), gh(`/search/issues?q=${q}&per_page=8`).catch(() => ({items:[]})) ]);
-    const a = (code.items||[]).map(x => '・ファイル: ' + x.path); const b = (iss.items||[]).map(x => `・#${x.number} ${maskText(x.title)}（${x.state}${x.pull_request ? '・PR' : ''}）`);
-    return (a.length || b.length) ? [...a, ...b].join('\n') : '見つかりませんでした'; }),
+    const [paths, iss] = await Promise.all([ getTree().catch(() => []), gh(`/search/issues?q=${q}&per_page=8`).catch(() => ({items:[]})) ]);
+    let found = searchPaths(paths, query);
+    if (!found.length){ const toks = normQ(query).split(' ').filter(Boolean); for (const t of toks){ found = searchPaths(paths, t); if (found.length) break; } }
+    const dirs = [...new Set(found.map(p => p.split('/').slice(0,2).join('/')))].slice(0,5);
+    const a = found.map(p => '・ファイル: ' + maskText(p)); const d = dirs.map(p => '📁 フォルダ: ' + maskText(p)); const b = (iss.items||[]).map(x => `・#${x.number} ${maskText(x.title)}（${x.state}${x.pull_request ? '・PR' : ''}）`);
+    return (a.length || b.length) ? [...d, ...a, ...b].join('\n') : '見つかりませんでした。別の言い方（短い1語）で探すか、フォルダ名を read_file で開いてください'; }),
   list_pending: wrapTool('list_pending', async () => { if (!ghToken) throw new Error('GitHub の鍵がありません'); const rows = await gh(`/repos/${REPO}/issues?state=open&labels=waiting:approval&per_page=50`);
     if (!rows.length) return 'かずきの判断待ちは 0 件です'; return `判断待ち ${rows.length} 件:\n` + rows.map(x => `・#${x.number} ${maskText(x.title)}（${x.pull_request ? 'PR' : 'Issue'}・${Math.round((Date.now()-new Date(x.updated_at))/36e5)}時間前に更新）`).join('\n'); }),
   read_issue: wrapTool('read_issue', async ({number}) => { if (!ghToken) throw new Error('GitHub の鍵がありません'); const n = parseInt(number,10); if (!n) throw new Error('番号が要ります');
@@ -298,7 +312,9 @@ async function githubContext(){
   if (!ghToken) return {};
   const out = {}; try { const rows = await gh(`/repos/${REPO}/issues?state=open&labels=waiting:approval&per_page=50`); out.pending_count = rows.length; out.pending_prs = rows.filter(x => x.pull_request).length; } catch(e){}
   const ok = await loadMaskWords(); out.employee_mode = ok ? (allowWrite ? '読める・書ける（書き込みは画面で許可）' : '読めるだけ') : '鍵はあるが伏せ字の名簿を読めないため資料は渡せない';
-  if (ok || rawMode){ try { const a = await readRepoFile('00_システム/00_UserProfile/00_マスター(Master_Context).md'); const b = await readRepoFile('00_システム/00_UserProfile/02_最新コンテキスト(Active_Context).md'); out.company_context = clip(maskText(a), 1500) + '\n\n' + clip(maskText(b), 1800); } catch(e){ out.company_context = '（読めませんでした: ' + (e.message||e) + '）'; } }
+  if (ok || rawMode){ try { const a = await readRepoFile('00_システム/00_UserProfile/00_マスター(Master_Context).md'); const b = await readRepoFile('00_システム/00_UserProfile/02_最新コンテキスト(Active_Context).md');
+      let projects = ''; try { projects = '\n\n進行中の事業・プロジェクト（01_プロジェクト/ のフォルダ名。詳しくは search → read_file で読む）: ' + projectList(await getTree()).join('、'); } catch(e){}
+      out.company_context = clip(maskText(a), 1400) + '\n\n' + clip(maskText(b), 1600) + maskText(projects); } catch(e){ out.company_context = '（読めませんでした: ' + (e.message||e) + '）'; } }
   return out;
 }
 async function startCall(how){
